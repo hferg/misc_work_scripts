@@ -318,10 +318,31 @@ hortChange <- function(landuse, target = 40, mode = "crop_first",
 }
 
 #' projectSpecies
-#' 
+#' This function takes the prefix of the pipeline output for a single output
+#' (typically the species names), the directory that the results are in (in case
+#' it isn't where this function is being run), a new landuse dataset (with all
+#' the same names as the original one used to fit the model) and then projects
+#' the species occurence from the original model with the new landuse.
+#' @param species The file prefix
+#' @param resdir The path to the directory that the pipeline outputs are in
+#' @param new_landuse A new landuse scenario - will be a raster stack (so if it
+#' is a file, load it!)
+#' @param scenario The name of the scenario - used to name the saved output of 
+#' this function. If left out a random number is used.
+#' @param outdir The directory path to save the output file to. If NULL or left
+#' out it saves where this function is run.
 
-projectSpecies <- function(species, resdir, new_landuse, scenario,
-  outdir) {
+projectSpecies <- function(species, resdir, new_landuse, scenario = NULL,
+  outdir = NULL) {
+  
+  if (is.null(scenario)) {
+    scenario <- as.character(round(runif(1, 1, 10000000)))
+  }
+
+  if (is.null(outdir)) {
+    outdir <- "./"
+  }
+
   modfile <- paste0(species, "_model_outputs.RDS")
   mod <- readRDS(file.path(resdir, modfile))
 
@@ -339,7 +360,13 @@ projectSpecies <- function(species, resdir, new_landuse, scenario,
 }
 
 #' addHorti
-#' 
+#' This one just adds the new horticulture projections back into the original
+#' model outputs so that the downstream functions in sdmpl can function properly
+#' @param species The file prefix
+#' @param mod_dir the directory that the results are in
+#' @param horti_dir the directory that the horticulture results are in
+#' TODO - add in some catches for if mod_dir and horti_dir are unspecified
+#' (i.e., if they == NULL assume current path).
 
 addHorti <- function(species, mod_dir, horti_dir) {
   modfile <- paste0(species, "_model_outputs.RDS")
