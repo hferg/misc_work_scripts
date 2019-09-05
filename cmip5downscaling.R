@@ -6,127 +6,7 @@
 # openID is https://esgf-data.dkrz.de/esgf-idp/openid/henryfgow
 # username is henryfgow
 
-## Series of functions to downscale CMIP5 data to the UK OS grid used in the 
-# ADVENT/NEVO work. This has two functions: 1) to put the data onto the correct
-# grid and 2) to allow us to generate decadal averages going into the future
-# over the same time periods that NEVO is intersted in.
-
-# WAIT! This general algorithm is incorrect (or at least, it's incorrect
-# compared to what vivienne has been doing).
-
-# Vivenne algorithm.
-#   1) Calculate climatogolies of all bioclim variables and GCMS in the original
-#     low-resolution for the same period as the high-resolution climatologies
-#     from CHELSA (1979-2005) from the 2006-2014 rcp85 historical experiments
-#    2) calculate annual time-series (2006-2099) of bioclimatic variables for
-#     future scenarios (whatever rcp, basically) in low-resolution (i.e., from
-#     the GCMs).
-#    3) calculate GCM climate anomalies relative to the GCM current (historical)
-#      climatology (effectively future - present, per cell).
-#    4) Add the low-resolution anomalies to the high resolution CHELSA data for
-#     current climates.
-#    5) bilinear interpolation used to reduce discontinuities at the gcm grid
-#     boundaries.
-
-# this is done for each gcm, and then the total output averaged.
-
-
-# henry verbal version.
-
-# Start with a GCM.
-
-# Establish the baseline in low-res. This means taking the historical climate 
-# from the same models for the years that match the years that CHELSA is taken
-# from - 1979-2013. The PROBLEM here is that the historical experiments from
-# CMIP5 are up to 2005. To rectify this I can take the future rcp85 predictions
-# from 2005 to 2013 to use. At this point the downscaling ought to fork - one
-# version that calculates anomalies from a 1979-2005 baseline (i.e., shorter
-# time frame than CHELSA) and one that includes the first few years of the
-# predictions. There will be a baseline for each of tmax, tmin, tas and pr
-# Do this for each of the bands in each of the gcm outputs. these should be
-# days I think.
-
-# the GCM-now then needs to become bioclim - so calculate into bioclim
-# variables.
-
-# repeat this for each of the GCM modlels and take a mean - this then gives the 
-# mean "present" gcm output for bioclim.
-
-# then repeat for the future - average across decades. So:
-#   1) calculate annual bioclim for each year in a decade per model
-#     1a) the first thing is to turn the daily data into monthly means.
-#   2) average across models for each timestep (year).
-#   3) average across the ensemble years to generate the decadal data.
-#   4) use the ensemble mean to get the anomaly from the gcm-now ensemble
-#   5) add the anomaly to the chelsa data.
-
-# NOTE ON AVERAGING
-#   I want to average each model at each timestep, and then average across time.
-#   So in short, make an ensemble for each timestep, then an average across 
-#     those.
-#  AVERAGING ALGORITHM
-#   1) WITHIN a GCM calculate the monthly averages.
-#   2) Use this to calculate ANNUAL bioclim for THAT GCM.
-#   3) Average annual bioclim ACROSS GCMS to produce an ensemble model for each
-#     year.
-#   3) Generate decadal predictions from the annual ensemble.
-#   4) Use the decadal ensemble average to calculate anomaly from baseline.
-#   5) Add this anomaly back to the high-res data to create a decadal high-res
-#     bioclim prediction.
-
-# DO THIS WITH VELUX!!!
-
-# files required to test.
-# Low res historical - 4 GCMs
-# Low res future for one variable - 4 GCMS
-# High-res current climatology - CHELSA
-
-# required info for the function.
-#   gcm name
-#   variable name
-#   
-
-
-# NOTES FROM OLLIE
-#   if they have precip I highly recommend using ISIMIP2b
-#   https://www.isimip.org/gettingstarted/availability-input-data-isimip2b/
-#   "it's already regridded and downscaled
-#   like they adjust the temperature to be more realistic
-#   by comparing it against observations
-#   and making adjustments"
-#   I'd suggest getting an ensemble average of daily data 
-#   and then doing the monmean
-
-
-# first just test this for a single model and single input type.
-# there could be multiple input types, due to different models. that means i
-# i need to check them and make the function work accordingly. to get the
-# general pipeline working, though, just work on one of them.
-
-
-########
-##  UNITS
-# ISIMIP
-#   pr  kg m-2 s-1 
-#   t K
-# CHELSA
-#   pr mm for annual, mm per month for precip of wettest month, mm per quarter
-#     for quarterly.
-#   pr converts to daily percip by taking kg/m2s and 24 * 60 * 60
-#   t C * 10 (some confusion here - the unit is tenths of C, written as 
-#     C/10 but calculated by multiplying by 10. SO convert K to C, then compare
-#     the result.)
-#   To convert, use K - 273.15.
-
-
-########
-# FAILED FILES.
-# pr_day_MIROC5_rcp26_r1i1p1_EWEMBI_landonly_22110101-22201231.nc
-# tas_day_GFDL-ESM2M_rcp85_r1i1p1_EWEMBI_landonly_20510101-20601231.nc
-
-setwd("/home/hfg/Documents/projects/advent/isimip_data/pr")
-
-library(raster)
+setwd("/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data")
 
 # Initial approach.
 # Make the annual bioclim layers for each model and year, and then make them
@@ -165,6 +45,12 @@ return_files <- function(model, time_period) {
 #' @param outpath The path for the output (NULL of the same directory as input
 #' is desired)
 
+# ERROR!
+# Here, when I have calculated the monthly means, I have made precipitation into
+# the mean daily per month, but bioclim wants the total per month... that means
+# that the precipitation files need to be redone! That ALSO means that I need
+# to re-download the precipitation data...
+
 cdo_momeans <- function(files, outpath) {
   dir.create(outpath, showWarnings = FALSE)
   info <- strsplit(files, "_")
@@ -176,36 +62,41 @@ cdo_momeans <- function(files, outpath) {
     years <- strsplit(strsplit(inf[8], "\\.")[[1]], "-")[[1]]
     years <- paste(substr(years, start = 1, stop = 4), collapse = "-")
 
-    filename <- paste(
-      c(inf[1], inf[3], inf[4], "monmeans", years), 
-      collapse = "_")
-    outfile <- paste0(outpath, "/", filename, ".nc")
-    system(paste("cdo monmean", files[x], outfile))
+    if (grepl("pr", inf[1])) {
+      
+      filename <- paste(
+        c(strsplit(inf[[1]], "/")[[1]][2], inf[3], inf[4], "monsum", years), 
+        collapse = "_")
+      outfile <- paste0(outpath, "/", filename, ".nc")
+      command <- "cdo mulc,86400 -monsum"
+    } else {
+      filename <- paste(
+        c(strsplit(inf[[1]], "/")[[1]][2], inf[3], inf[4], "monmeans", years), 
+        collapse = "_")
+      outfile <- paste0(outpath, "/", filename, ".nc")
+      command <- "cdo mulc,10 -addc,-273.15 -monmean"
+    }   
+    system(paste(command, files[x], outfile))
     }
   )
   parallel::stopCluster(cl)
 }
 
-# establishing the baseline.
-# 1) generate annual bioclims for each year in the historical time period.
-# 2) turn these into a mean for each of the GCMs - this is then the baseline
-#   from which future anomalies can be calculated.
+#' make_bioclim
+#' Generates annual bioclims from the precipitation, tmin and tmax from gcm
+#' outputs. The outputs need to already be in monthly means (see cdo_momeans).
+#' The model and scenario arguments are used as lookups for filenames, so
+#' the gcm input files need to be named with the model name and scenario name 
+#' with underscores to seperate. 
+#' e.g. pr_GFDL-ESM2M_historical_monmeans_1861-1870.nc
+#' @param model The name of the GCM model to use
+#' @param scenario The GCM scenario (e.g. historical, rcp26 etc)
+#' @param pr_path The filepath to where the precipitation files are
+#' @param tmin_path The filepath to where the tmin files are
+#' @param tmax_path The filepath to where the tmax files are
+#' @param outpath The filepath to save the outputs.
 
-# generate annual bioclims.
-# Axes of variation:
-#   Variable
-#   Model
-#   Time period
-#   Scenario (historic vs rcp scenarios)
-
-# QUESTION. Once I have the monthly means, can I just use biovars in dismo
-# to generate the bioclim data?
-
-# biovars takes 12 layers - the months of the year. So that means I can load
-# the three monthly mean files (pr, tmin, tmax) and then split them into
-# annual stacks (12 months each) and then generate from biovars?
-
-makeBioclim <- function(model, scenario, pr_path, tmin_path, tmax_path,
+make_bioclim <- function(model, scenario, pr_path, tmin_path, tmax_path,
   outpath) {
   dir.create(outpath, showWarnings = FALSE)
   pr_files <- list.files(pr_path)
@@ -239,7 +130,7 @@ makeBioclim <- function(model, scenario, pr_path, tmin_path, tmax_path,
     for (i in seq_along(bc_temp)) {
       bc_temp[[i]] <- pr_r[[1]][[1]]
     }
-    bc_temp <- stack(bc_temp)
+    bc_temp <- raster::stack(bc_temp)
 
     # calculate bioclim - this is pretty slow to be honest! Can we velox this?
     print("setting up cluster")
@@ -248,15 +139,15 @@ makeBioclim <- function(model, scenario, pr_path, tmin_path, tmax_path,
       print("calculating bioclim")
       bcx <- parallel::parLapply(cl, seq_along(ind), function(x) {
         .ind <- c(ind[x]:(ind[x] + 11))
-        n <- names(pr_r)[x]
+        n <- names(pr_r)[.ind[1]]
         n <- strsplit(n, "\\.")[[1]][1]
         yr <- strsplit(n, "X")[[1]][2]
         
         # This is faster and safer - just need to put the output back into
         # raster format.
-        pr <- as.matrix(pr_r[[.ind]])
-        tmn <- as.matrix(tmin_r[[.ind]])
-        tmx <- as.matrix(tmax_r[[.ind]])
+        pr <- raster::as.matrix(pr_r[[.ind]])
+        tmn <- raster::as.matrix(tmin_r[[.ind]])
+        tmx <- raster::as.matrix(tmax_r[[.ind]])
         print(paste0("x = ", x))
         bc <- dismo::biovars(
           prec = pr,
@@ -274,26 +165,120 @@ makeBioclim <- function(model, scenario, pr_path, tmin_path, tmax_path,
       })
     print("stopping cluster")
     parallel::stopCluster(cl)
-    # print("getting years")
-    # years <- sapply(ind, function(x) {
-    #   n <- names(pr_r)[x]
-    #   n <- strsplit(n, "\\.")[[1]][1]
-    #   strsplit(n, "X")[[1]][2]
-    # })
-    # print("writing")
-    # for (i in seq_along(bc)) {
-    #   filename <- paste0(
-    #     outpath, "/bioclim_", model, "_", scenario, "_", years[i], ".nc")
-    #   raster::writeRaster(bc[[i]], file = filename, format = "CDF", 
-    #     overwrite = TRUE)
-    # }
     gc()
   }
 
   x <- lapply(1:length(pr_files), function(x){
-    single_file(pr_files[x], tmin_files[x], tmax_files[x],
+   t <- single_file(pr_files[x], tmin_files[x], tmax_files[x],
       model, scenario, outpath)
   })
+}
+
+#' make_baseline
+#' @name make_baseline
+#' @param model The name of the GCM model to use the model will be identified
+#' by searching for files in the file path, so files must be named in the right
+#' way. Can specify multiple models.
+#' @param start The starting year for the baseline
+#' @param end The ending year for the baseline
+#' @param future_scenario If the end date is after the extent of the historical
+#' files then we need to take from the future to make up the years - this is the
+#' rcp scenario to use for the future. rcp85 is recommended.
+#' @param file_path The file path to where the annual bioclims are. Defaults to
+#' NULL (i.e., run in the folder where the files are)
+#' @param outpath Where to save the baseline output to. Defaults to NULL.
+
+make_baseline <- function(model, start = 1979, end = 2013, future_scenario, 
+  file_path = NULL, outpath = NULL) {
+
+  # get the historical files
+  files <- list.files(file_path)
+  files <- files[grep(model, files)]
+  historical <- files[grep("historical", files)]
+  years <- sapply(historical, function(x) {
+    a <- strsplit(x, "_")[[1]]
+    strsplit(a[4], "\\.")[[1]][1]
+  })
+  historical <- historical[as.numeric(years) >= start]
+
+  # now add extension, if needed.
+  if (end > max(as.numeric(years))) {
+    ext <- files[grep(future_scenario, files)]
+    years <- sapply(ext, function(x) {
+      a <- strsplit(x, "_")[[1]]
+      strsplit(a[4], "\\.")[[1]][1]
+    })
+    ext <- ext[as.numeric(years) <= end]
+    dat <- c(historical, ext)
+  } else {
+    dat <- historical
+  }
+
+  # now read these in and make a mean.
+  st <- lapply(dat, function(x) {
+    raster::stack(file.path(file_path, x))
+  })
+  stx <- Reduce("+", st)
+  baseline <- stx / length(dat)
+  names(baseline) <- c("bio1", "bio2", "bio3", "bio4", "bio5", "bio6", "bio7",
+    "bio8", "bio9", "bio10", "bio11", "bio12", "bio13", "bio14", "bio15", 
+    "bio16", "bio17", "bio18", "bio19")
+
+  filename <- file.path(outpath, 
+    paste0(model, "_", start, "-", end, "_baseline.nc")
+  )
+  raster::writeRaster(baseline, file = filename, format = "CDF",
+    overwrite = TRUE)
+}
+
+#' calculate_anomalies
+#' Calculates the anomalies between future climate scenarios and a baseline
+#' and saves the output to disk. The function calls cdo so all files need to be
+#' netCDF
+#' @param model The GCM to process data for
+#' @param scenario The scenario to process for (e.g. rcp26, rcp85)
+#' @param start The year to start at (needed because the baseline may use some
+#' years from the early part of the future simulations)
+#' @param baseline_path The file path where the baseline is saved
+#' @param future_path The file path where the futures are saved
+#' @param outpath Where to save the outputs to.
+
+calculate_anomalies <- function(model, scenario, start, baseline_path, 
+  future_path, outpath) {
+  # first load the baseline
+  base_files <- list.files(file.path(baseline_path))
+  base_file <- base_files[grep(model, base_files)]
+  # baseline <- raster::stack(
+  #   file.path(baseline_path, base_file)
+  # )
+
+  # now get the filenames for the model, scenario, years in the future
+  future_files <- list.files(file.path(future_path))
+  future_files <- future_files[grep(model, future_files)]
+  future_files <- future_files[grep(scenario, future_files)]
+
+  # now get the years.
+  years <- sapply(future_files, function(x) {
+    a <- strsplit(x, "_")[[1]]
+    strsplit(a[4], "\\.")[[1]][1]
+  })
+
+  future_files <- future_files[as.numeric(years) >= start]
+
+  # now calculate the anomalies.
+  cl <- parallel::makeForkCluster(10)
+    parallel::parLapply(cl, future_files, function(x) {
+      year <- strsplit(x, "_")[[1]]
+      year <- strsplit(year[4], "\\.")[[1]][1]
+      b_path <- file.path(baseline_path, base_file)
+      f_path <- file.path(future_path, x)
+      o_path <- file.path(outpath, 
+        paste0(
+          paste(c(model, scenario, "anomaly", year), collapse = "_"), ".nc")
+      )
+    system(paste("cdo sub", f_path, b_path, o_path))
+    })
+  cl <- parallel::stopCluster(cl)
 }
 
 downscale_bioclim <- function(reference, baseline, future) {
@@ -305,14 +290,164 @@ downscale_bioclim <- function(reference, baseline, future) {
 
 }
 
-downscale_single <- function() {
-  # this is the basic line for the downscaling.
-  hires <- resample(lowres_anomaly, hires_current, method="bilinear")
+crop_downscale <- function(anomaly, anomaly_path, current, extent, outpath) {
+  # anomaly is the file name anomaly stack.
+  # anomaly path is the path to the anomalies
+  # baseline path is the path to where the baselines are (to be matched with 
+  # the anomaly name).
+  # extent is the extent of the european analysis.
+
+    x <- strsplit(anomaly, "\\.")
+    x <- strsplit(x[[1]][1], "_")[[1]]
+
+    filename <- paste0(x[1], "_", x[2], "_", x[4], "_hires.grd")
+    filename <- file.path(outpath, filename)
+
+  # load the anomaly
+  aa <- raster::stack(file.path(anomaly_path, anomaly))
+  
+  # crop the anomaly to the extent
+  aa <- raster::crop(aa, extent)
+
+  # load the current
+  cc <- raster::stack(current)
+  output_names <- c()
+  for (i in seq_along(names(aa))) {
+    an <- strsplit(anomaly, "\\.")[[1]][1]
+    tmp_file <- paste0(".tmp_file_bio_", 
+      stringr::str_pad(i, 2, pad = "0"), "_", an, ".grd")
+    output_names[i] <- tmp_file
+    a_h <- raster::resample(aa[[i]], cc[[i]], method = "bilinear")
+    a_h <- a_h + cc[[i]]
+    raster::writeRaster(a_h, file = tmp_file, format = "raster",
+      overwrite = TRUE)
+    rm(a_h)
+    gc()
+  }
+
+  # make a filename...
+  a_hires <- raster::stack(output_names)
+  raster::writeRaster(a_hires, file = filename, format = "raster")
+  # remove the temporary files.
+  # add .gri files to the vector.
+  output_names <- c(output_names,
+    paste0(unlist(strsplit(output_names, ".grd")), ".gri"))
+  file.remove(output_names)
 }
 
-bioclim_averages <- function(models, window_size, scenario) {
+# this function is going to average across each model in a year to make annual
+# averages, which will then be used to calculate decadal averages.
+
+hires_path <- "./hires_bioclim_annual"
+files <- list.files(hires_path)
+models <- unique(sapply(files, function(x) strsplit(x, "_")[[1]][1]))
+years <- unique(sapply(files, function(x) strsplit(x, "_")[[1]][3]))
+rcps <- c("rcp26", "rcp60", "rcp85")
+mode <- "by_year"
+outpath <- "hires_annual_means"
+
+annual_averages <- function(hires_path, models, years, rcps, mode = "by_year",
+  outpath) {
+  files <- list.files(hires_path)
+  dir.create(file.path(outpath), showWarnings = FALSE)
+  # identify all files of a particular year/model
+  if (mode == "by_year") {
+    all_denom <- years
+  } else if (mode == "by_model") {
+    all_denom <- models
+  }
+
+  # add RCPS
+  combos <- expand.grid(all_denom, c("rcp26", "rcp60", "rcp85"))
+
+  # parallelise the work through these combos... keep an eye on RAM and disk
+  # space... 
+
+  one_average <- function(files, denom, rcp) {
+    gp <- files[grep(denom, files)]
+    gp <- gp[grep(rcp, gp)]
+    gp <- gp[grep(".grd$", gp)]
+    x <- vector(mode = "list", length = length(gp))
+    for (i in seq_along(gp)) {
+      x[[i]] <- raster::stack(file.path(hires_path, gp[i]))
+    }
+    n <- length(names(x[[1]]))
+    cl <- parallel::makeCluster(10)
+    mns <- parallel::parLapply(cl, 1:n, function(z) {
+      tmp <- raster::stack(
+        x[[1]][[z]],
+        x[[2]][[z]],
+        x[[3]][[z]],
+        x[[4]][[z]]
+      )
+      mn <- raster::calc(tmp, fun = mean)
+      rm(tmp)
+      gc()
+      return(mn)
+    })
+    parallel::stopCluster(cl)
+
+    rm(tmp)
+    xm <- raster::stack(mns)
+    names(xm) <- c("bio1", "bio2", "bio3", "bio4", "bio5", "bio6", "bio7",
+      "bio8", "bio9", "bio10", "bio11", "bio12", "bio13", "bio14", "bio15",
+      "bio16", "bio17", "bio18", "bio19")
+    rm(mns)
+    gc()
+    return(xm)
+  }
+
+  # parellisation check - this takes about 2000 seconds so these jobs are going
+  # on the cluster... See new script for function, and second script for job
+  # creation.
+  # the script will need to scp the data over from RDS, then remove it after the
+  # analysis finishes. There isn't enough space to store it on Myriad at the
+  # moment. If each job takes half an hour in parallel, then give it 24 hours
+  # for each job in series. This means we can move to $TMPDIR which means we 
+  # can import the data properly without counting against scratch (as we would
+  # if working parallel).
+  system.time(bioc_2014 <- one_average(files, 
+    denom = combos[1,1], rcp = combos[1,2]))
+
+
+
+  # write out.
 
 }
+
+
+# test something...
+x <- c(1:10)
+xx <- 0
+for (i in seq_along(x)) {
+  xx <- xx + x[i]
+  print(xx / i)
+}
+
+
+
+# downscale_single <- function(current_path, future_anomaly) {
+#   # this is the basic line for the downscaling.
+#   # resample the anomalies to the same resolution as the hires
+#   hires <- resample(lowres_anomaly, hires_current, method="bilinear")
+#   # then simply add...
+#   # NOTE there might need to be a recalculation here (i.e. convert to same 
+#   # units.)
+#   # This is SUPER slow - I can use cdo again here, I think... test.
+#   hires_future <- hirescurrent + hires
+
+#   # time test the raster method.
+#   current_path <- 
+
+#   future_anomaly <- 
+
+# }
+
+# bioclim_averages <- function(models, window_size, scenario) {
+
+# }
+
+# start-to-finish wrapper function.
 
 # generate the bioclims across the range of models and scnearios.
 setwd("/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data")
@@ -320,164 +455,195 @@ models <- c("HadGEM2-ES", "IPSL-CM5A-LR", "MIROC5", "GFDL-ESM2M")
 scenarios <- c("historical", "rcp26", "rcp60", "rcp85")
 combos <- expand.grid(models, scenarios)
 
+# use CDO to generate the means/sums and rescale the units.
+files <- c(
+  file.path("pr", list.files("./pr")),
+  file.path("tasmax", list.files("./tasmax")),
+  file.path("tasmin", list.files("./tasmin"))
+)
+
+keeps <- c(
+  grep(models[1], files),
+  grep(models[2], files),
+  grep(models[3], files),
+  grep(models[4], files)
+)
+files <- files[keeps]
+
+prf <- files[grep("^pr", files)]
+tminf <- files[grep("^tasmin", files)]
+tmaxf <- files[grep("^tasmax", files)]
+cdo_momeans(prf, outpath = "./pr/pr_mosums")
+cdo_momeans(tminf, outpath = "./tasmin/tasmin_momeans")
+cdo_momeans(tmaxf, outpath = "./tasmax/tasmax_momeans")
+
+# rescale the units and make monthly means (or, in the case of precip, sums).
+# list all the files - take the prefixes to make this somewhat easier...
+# should I use return files here?!
+
 # take the model and scenario and expand into grid to loop across - generate 
 # annual bioclims per scenario, model, year combination.
 
+# generate annual bioclims
 for (i in 1:nrow(combos)) {
-  makeBioclim(
+  make_bioclim(
     model = as.character(combos$Var1[i]),
     scenario = as.character(combos$Var2[i]),
-    pr_path = "./pr/pr_momean",
-    tmin_path = "./tasmin/tasmin_momean",
-    tmax_path = "./tasmax/tasmax_momean",
-    outpath = "bioclim_annual"
+    pr_path = "./pr/pr_mosums",
+    tmin_path = "./tasmin/tasmin_momeans",
+    tmax_path = "./tasmax/tasmax_momeans",
+    outpath = "lores_bioclim_annual"
   )
 }
 
+# make baselines
+cl <- parallel::makeForkCluster(4)
+  parallel::parLapply(cl, models, function(x) make_baseline(model = x, 
+    start = 1979, end = 2013, 
+    future_scenario = "rcp85",
+    file_path = "lores_bioclim_annual", outpath = "baselines"))
+parallel::stopCluster(cl)
 
-
-# NOTE: I am pretty sure that I will need to generate annual bioclims for ALL 
-# years regardless of the situation. Then it is a matter of combining historical
-# ones and using the future ones for other things. Thus, this function might as
-# well generate annual bioclims from all files.
-# The upshot of this is that it can be flexible to file type. 
-# Main input:
-#   Model
-#   Scenario
-# METHOD:
-#   Go into the folders and find all files with the model and scenario combo.
-#   From these files, find all the date ranges and order.
-#   Take first date range, and load the four variables for that specific model,
-#     scenario and date range.
-#   Identify key quarters.
-#     Wettest quarter
-#     Driest quarter
-#     Hottest quarter
-#     Coolest quarter
-#     
-
-# TODO Understand the quarterly calculations in the bioclim workflow.
-
-#' get_historical_years
-#' This function takes a set of files from a single GCM and returns the mean
-#' climatology across all of those files for the specified time period.
-
-get_historical_years <- function(files, minyear = 1970, maxyear = 2013) {
-  x <- raster::stack(file)
-  nms <- names(x)
-
-  # IMPORTANT:
-  # This needs to be done over the daily data, which means that... it means
-  # that the
-
-  # the names of each layer in the stack are the dates (year, month, day).
-  # check that they are all within the year range.
-
-  # If they are not, remove any bands/layers that are not included in the date
-  # range.
-
-  # Save out the file with the right date ranges, and include the name.
-
-  # load in the saved files, and make into a historical baseline mean.
-
-  # question: so I want to save the files to disk intermediately? Or do 
-  # something else like build up a massive raster stack and then mean on that?
-  # what is best for memory management here?
-
-
+# calculate anomalies
+futures <- c("rcp26", "rcp60", "rcp85")
+future_combos <- expand.grid(models, futures)
+for (i in 1:nrow(future_combos)) {
+  calculate_anomalies(
+    model = as.character(future_combos$Var1[i]),
+    scenario = as.character(future_combos$Var2[i]),
+    start = 2014,
+    baseline_path = "baselines",
+    future_path = "lores_bioclim_annual",
+    outpath = "anomalies"
+  )
 }
 
-# this function makes monthly means of a file. cdo takes ~26 seconds to do this
-# globally for a single file, so that's the thing to try to get near to. If it's
-# close we can perhaps to the whole thing in R. 17 seconds seems right.
-# the file that generate the 26 second time is this one:
-# pr_day_HadGEM2-ES_historical_r1i1p1_EWEMBI_landonly_20010101-20051231.nc
-make_monthly_means <- function(file) {
-  x <- raster::stack(file)
-}
+# test a single instance of the resample to europe function
+# load extent
+# OK - this takes 10 hours, and requires 68.6*2 Gb of temp space MIN. That's
+# 137Gb - so I think make up to 150 just to make sure there's space for temp 
+# files
+
+extent <- readRDS("../euro_extent.rds")
+system.time(
+crop_downscale(
+  anomaly = "GFDL-ESM2M_rcp26_anomaly_2014.nc",
+  anomaly_path = "./anomalies",
+  current = "../chelsa_climatologies/chelsa_all_bioclim.grd",
+  extent = extent,
+  outpath = "hires_bioclim_annual"
+  )
+)
+
+# Full global downscaling is going to a) take FOREVER and b) generate one 
+# million gigabytes (approx.) of data - so for the time being I think it's best
+# to chop down to the european scale and downscale that for the sake of getting
+# the ADVENT work going sooner rather than later (i.e. get plugged into NEVO
+# with the pollinators).
+
+# the crop_downscale function will do this. It's still slow though - I need to
+# get this on the cluster for sure. It's using 10 cores at the moment - has been
+# going for over an hour - I am sure it's still working?
+
+# the first thing to do is to get the extent of the study area - this means
+# load in one of the examples from the advent project. It MIGHT be possible,
+# actually, to resample everything into the correct resolution for ADVENT as
+# well... This will, of course, replace the current bioclim data with the 
+# CHELSA data - but that's fine... probably better in fact?
+
+# time the crop_downscale function and then compare that to the same operation
+# using cdos.
+
+# load in european extent from pollinators model.
+euro <- raster::stack(
+  "/home/hfg/rds_mount/advent-rds/henry/advent/modeling/pollinators/jobs/bioclim_now_cropped.grd"
+  )
+euro_w <- raster::projectRaster(euro, 
+  crs = sp::CRS(sp::proj4string(raster::raster(
+    file.path("./anomalies", anomalies[[1]])))))
 
 
-################################################################################
-#                                                                              #
-#                               PIPELINE                                       #
-#                                                                              #
-################################################################################
+# then take just one of those layers... 
+e_1 <- euro[[1]]
+# transform to match the other projections
+e_p <- raster::projectRaster(e_1, 
+  crs = sp::CRS(sp::proj4string(raster::raster(anomalies[[1]]))))
 
-# first process monthly means for all files.
+# then take the extent
+euro_e <- raster::extent(e_p)
 
-cdo_momean(list.files(), outpath = "pr_momeans", )
+# save for the future...
+saveRDS(euro, file = "../../euro_extent.rds")
+saveRDS(e_1, file = "../../euro_extent_map.rds")
 
+# NOW - see if cropping to the new object will do both the rescale AND the 
+# crop...
 
-# first build current climatology. refresher for steps.
-# 1 load the data
-# 2 generate per-year bioclims
-# 3 take the first few years of the futures at rcp85 for the same model.
-# 4 combine output of 2 and 3
-# 5 save this for the model and the year and the bioclim variable
-# 6 repeat 1-5 for models
+anom <- raster::stack(
+  "./anomalies/GFDL-ESM2M_rcp26_anomaly_2020.nc"
+)
 
+a_crop <- raster::crop(anom[[1]], euro)
+system.time({
+  a_crop <- raster::crop(anom, euro)
+  a1 <- raster::resample(a_crop, e_p, method = "bilinear")
+  x <- euro + a1
+  })
 
-# this is daily precipitation for 2005-2015.
-cmip_f <- raster("pr_day_HadGEM2-ES_rcp26_r1i1p1_20051201-20151130.nc")
+# now we need the hi-res bioclim... unfortunately it's currently all seperate
+# layers - can we read it all in and make one object?!
 
+setwd("/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/chelsa_climatologies")
+files <- list.files()
+files <- files[grep("CHELSA", files)]
+xx <- raster::stack(files)
 
+# now read the anomaly
+anom <- raster::stack(
+  "../isimip_data/anomalies/GFDL-ESM2M_rcp26_anomaly_2020.nc"
+)
 
+system.time({
+  hires_anom <- raster::resample(anom, xx, method = "bilinear")
+})
 
+# How long does a single resample take? - answer! 8 minutes.
+system.time({
+  hires_anom <- raster::resample(anom, xx[[1]], method = "bilinear")
+  raster::writeRaster(hires_anom, file = "test_hires.grd", format = "raster")
+})
 
-
-
-
-# General algorithm (verbal).
-# 1) Take the CMIP5 layer, which will be on a larger grid than the UK data.
-#   1a) In order to be able to compare to the CHELSA climatology for now the
-#     cmip5 data needs to be converted to monthly maps, and then the temperature
-#     needs to split into three new maps - mean for the month, max for the month
-#     and min for the month.
-# 2) Get the European extent of the area of interest, and crop the CMIP5 layer
-#   to that same extent.
-# 3) Make sure the grid lines are matched over the two extents, and then 
-#   generate an intermediate layer for the CURRENT europe climate (taken from
-#   CHELSA) where the cells are aggregated to be on the same resolution and grid
-#   as the CMIP5 data.
-# 4) Ensure that each of the cells on the standard Europe grid are associated
-#   with one of the larger cells on the intermediate layer (n -> 1 relationship)
-# 5) For each of the cells on the intermediate grid calculate the mean of the 
-#   smaller cells that are within it. This gives the intermediate layer one
-#   value per larger cell, comprised of the smaller cells that make it up.
-# 6) Take that intermediate grid, and then calculate the anomlay between the 
-#   current cliamte (intermediate cells) and the CMIP5 future (the CMIP5 layer)
-# 7) For each of the larger cells in the intermediate layer, add the anomaly 
-#   value to each of the smaller cells that it is compriesd of in the current
-#   european layer. This gives the downscaled future.
-# 8) Make an ensemble from the range of models used (i.e., the selection of 
-#   climate models) and then generate bioclim for those decadal averages from
-#   that.
-
-# Missing/situational steps, and outstanding questions.
-#   1) When the CMIP5 data is daily or monthly it needs to become annual. This 
-#     can be done by averaging across the time period, either 12 bands if 
-#     monthly, or 365 bands if daily. The files SHOULD have month and year 
-#     specified, but if not be mindful of the number of days in each month.
-#   2) The output needs to be averaged to decadal data. Two options: Either 
-#     make the CMIP5 input decadal, OR generate daily/monthly/annual anomaly
-#     maps and then make them decadal.
-#     NB. Minimum computing time will be first make the CMIP5 data decadal, and 
-#       then generating anomalies. i.e., just one anomlay calculation per decade
-#       vs. 3650, 120, 10 etc.
+# How long does it take to make anomalies for a full stack in parallel?
+# This is a NO - RAM caps out almost immediately. Perhaps take to the cluster?
+# I could do a seperate job (and thus ram) for each layer - the problem here
+# is that will be like... 99*19*4 jobs or something.
 
 
-# testing directory (where the data is...)
-setwd("/home/hfg/Documents/hfg_soft/test_data/cmip5")
+# use gdalwarp to a) see what it does and b) see if it's faster.
 
-library(raster)
+# if gdalwarp isn't any faster, or rather considerably faster, then make a
+# script for the cluster - it's going to be 1032 jobs to do each stack
+# altogether (8 hours ish per job) - that's 1 full queue and a tiny bit.
 
-cmip <- raster("pr_day_HadGEM2-ES_rcp26_r1i1p1_20051201-20151130.nc")
+# this seems slow, and I'm not even sure if it will work...
 
-## Notes.
-#   1. CMIP5 data are 0-360 degrees, whereas everything I have been working with
-#     is -180 - 180 degrees. The latitudes are the same. To deal with this use
-#     the raster::rotate function.
-#   2. Of note - the grid doesn't actually have to match the UK grid since this
-#     is just envelope generation - it gets transformed during the envelope 
-#     analysis. It just has to be the same resolution as the CHELSA data that 
-#     I plan to use.
+chel <- 
+
+gdalUtils::gdalwarp()
+
+# problem 1 - the layers/names are in the wrong order.
+# problem 2 - the names are different (probably fine?)
+# problem 3 - 
+
+
+
+# FROM MYRIAD
+# Run is complete - check that it's worked and produced the right data...
+# I don't think it has thouygh - it's 3.6GB instead of the expected 68Gb...
+# I am not sure what's happened here? Got it! I did raster::raster not
+# raster::stack for the anomaly...
+
+#####
+#####
+
+# Take the 

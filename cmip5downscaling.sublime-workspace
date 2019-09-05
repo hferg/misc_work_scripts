@@ -1,0 +1,943 @@
+{
+	"auto_complete":
+	{
+		"selected_items":
+		[
+			[
+				"origin",
+				"original_tree"
+			],
+			[
+				"node.",
+				"node.shape"
+			],
+			[
+				"node.pal",
+				"node.palette"
+			],
+			[
+				"nb.",
+				"nb.fill"
+			],
+			[
+				"tree_s",
+				"tree_summaries"
+			],
+			[
+				"new",
+				"new_occurence"
+			],
+			[
+				"analys",
+				"analysis_dir"
+			],
+			[
+				"an",
+				"analysis_dir"
+			],
+			[
+				"count",
+				"count_f4m"
+			],
+			[
+				"runtot",
+				"runtot_f4m"
+			],
+			[
+				"cookbook_a",
+				"cookbook_activation"
+			],
+			[
+				"sightings_per",
+				"sightings_per_capita"
+			],
+			[
+				"file_",
+				"file_prefixes"
+			],
+			[
+				"scne",
+				"scenario_diversity"
+			],
+			[
+				"scenario",
+				"scenario_diversity"
+			],
+			[
+				"coef",
+				"coefficients\t{stats}"
+			],
+			[
+				"rare",
+				"rarefied_presence"
+			],
+			[
+				"aic",
+				"aicSelectModel"
+			],
+			[
+				"set_edge",
+				"set_edge_attrs_ws\t{DiagrammeR}"
+			],
+			[
+				"add_edg",
+				"add_edges_from_table\t{DiagrammeR}"
+			],
+			[
+				"inva",
+				"invasive_stack"
+			],
+			[
+				"broen",
+				"broennimannEcospat"
+			],
+			[
+				"marsu",
+				"marsupials_vdelta_trees"
+			],
+			[
+				"maru",
+				"marsupials_vrates_trees"
+			],
+			[
+				"edg",
+				"edge.length"
+			],
+			[
+				"base_",
+				"base_family = \tArguments"
+			],
+			[
+				"geom_h",
+				"geom_histogram"
+			]
+		]
+	},
+	"buffers":
+	[
+		{
+			"contents": "#### ISIMIP data.\n# the ISIMIP data is bias-corrected, and should provide across-model averages\n# directly, meaning I can skip the step of averaging across models.\n# data are available here:\n#  https://esg.pik-potsdam.de/search/isimip/\n# openID is https://esgf-data.dkrz.de/esgf-idp/openid/henryfgow\n# username is henryfgow\n\nsetwd(\"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data\")\n\n# Initial approach.\n# Make the annual bioclim layers for each model and year, and then make them\n# hi-res from the CHELSA climatology. Don't do any averaging at this stage, \n# but retain all steps - the averaging can be done later if needs be, but the\n# per-model bioclims will be useful for comparing the SDMs fitted over each \n# model.\n\nmodels <- c(\"GFDL-ESM2M\", \"HadGEM2-ES\", \"IPSL-CM5A-LR\", \"MIROC5\")\ntime_periods <- c(\"historical\", \"rcp26\", \"rcp60\", \"rcp85\")\n\nreturn_files <- function(model, time_period) {\n  files <- list.files()\n  returns <- files[grepl(model, files)]\n  if (time_period != \"all\") {\n    returns <- returns[grepl(time_period, returns)]\n  }\n  return(returns)\n}\n\n#######\n#######\n#   Establishing a baseline.\n\n# This function needs to take a historical file, and trim it down to only the\n# years that are important for the baseline.\n# This function should produce two outputs - one global and one cropped to my\n# study area - that will save a lot of time downstream.\n\n#' cdo_momeans\n#' Takes a series of files and uses cdos to compute the montly means for those\n#' files.\n#' Naming convention will be the variable, the model name, and the yearly range\n#' followed by whatever is specified in outname\n#' @param files A vector of GCM output filenames.\n#' @param outpath The path for the output (NULL of the same directory as input\n#' is desired)\n\n# ERROR!\n# Here, when I have calculated the monthly means, I have made precipitation into\n# the mean daily per month, but bioclim wants the total per month... that means\n# that the precipitation files need to be redone! That ALSO means that I need\n# to re-download the precipitation data...\n\ncdo_momeans <- function(files, outpath) {\n  dir.create(outpath, showWarnings = FALSE)\n  info <- strsplit(files, \"_\")\n  # parallelise here...\n  cl <- parallel::makeForkCluster(parallel::detectCores() - 4)\n\n  parallel::parLapply(cl, 1:length(files), function(x) {\n    inf <- info[[x]]\n    years <- strsplit(strsplit(inf[8], \"\\\\.\")[[1]], \"-\")[[1]]\n    years <- paste(substr(years, start = 1, stop = 4), collapse = \"-\")\n\n    if (grepl(\"pr\", inf[1])) {\n      \n      filename <- paste(\n        c(strsplit(inf[[1]], \"/\")[[1]][2], inf[3], inf[4], \"monsum\", years), \n        collapse = \"_\")\n      outfile <- paste0(outpath, \"/\", filename, \".nc\")\n      command <- \"cdo mulc,86400 -monsum\"\n    } else {\n      filename <- paste(\n        c(strsplit(inf[[1]], \"/\")[[1]][2], inf[3], inf[4], \"monmeans\", years), \n        collapse = \"_\")\n      outfile <- paste0(outpath, \"/\", filename, \".nc\")\n      command <- \"cdo mulc,10 -addc,-273.15 -monmean\"\n    }   \n    system(paste(command, files[x], outfile))\n    }\n  )\n  parallel::stopCluster(cl)\n}\n\n#' make_bioclim\n#' Generates annual bioclims from the precipitation, tmin and tmax from gcm\n#' outputs. The outputs need to already be in monthly means (see cdo_momeans).\n#' The model and scenario arguments are used as lookups for filenames, so\n#' the gcm input files need to be named with the model name and scenario name \n#' with underscores to seperate. \n#' e.g. pr_GFDL-ESM2M_historical_monmeans_1861-1870.nc\n#' @param model The name of the GCM model to use\n#' @param scenario The GCM scenario (e.g. historical, rcp26 etc)\n#' @param pr_path The filepath to where the precipitation files are\n#' @param tmin_path The filepath to where the tmin files are\n#' @param tmax_path The filepath to where the tmax files are\n#' @param outpath The filepath to save the outputs.\n\nmake_bioclim <- function(model, scenario, pr_path, tmin_path, tmax_path,\n  outpath) {\n  dir.create(outpath, showWarnings = FALSE)\n  pr_files <- list.files(pr_path)\n    pr_files <- pr_files[grep(model, pr_files)]\n    pr_files <- pr_files[grep(scenario, pr_files)]\n    pr_files <- paste0(pr_path, \"/\", pr_files)\n\n  tmin_files <- list.files(tmin_path)\n    tmin_files <- tmin_files[grep(model, tmin_files)] \n    tmin_files <- tmin_files[grep(scenario, tmin_files)]  \n    tmin_files <- paste0(tmin_path, \"/\", tmin_files)\n\n  tmax_files <- list.files(tmax_path)\n    tmax_files <- tmax_files[grep(model, tmax_files)]\n    tmax_files <- tmax_files[grep(scenario, tmax_files)]\n    tmax_files <- paste0(tmax_path, \"/\", tmax_files)\n  \n  single_file <- function(pr_file, tmin_file, tmax_file,\n    model, scenario, outpath) {\n    print(\"reading pr\")\n    pr_r <- raster::stack(pr_file)\n    print(\"reading tmin\")\n    tmin_r <- raster::stack(tmin_file)\n    print(\"reading tmax\")\n    tmax_r <- raster::stack(tmax_file)\n    print(\"calculating indices\")\n    ind <- seq(1, length(names(pr_r)), 12)\n    print(paste0(model, \" \", scenario))\n    # make an raster stack object to assign bioclims to.\n    bc_temp <- vector(mode = \"list\", length = 19)\n    for (i in seq_along(bc_temp)) {\n      bc_temp[[i]] <- pr_r[[1]][[1]]\n    }\n    bc_temp <- raster::stack(bc_temp)\n\n    # calculate bioclim - this is pretty slow to be honest! Can we velox this?\n    print(\"setting up cluster\")\n    cl <- parallel::makeForkCluster(parallel::detectCores() - 4, \n      outfile = \"parallel_output.out\")\n      print(\"calculating bioclim\")\n      bcx <- parallel::parLapply(cl, seq_along(ind), function(x) {\n        .ind <- c(ind[x]:(ind[x] + 11))\n        n <- names(pr_r)[.ind[1]]\n        n <- strsplit(n, \"\\\\.\")[[1]][1]\n        yr <- strsplit(n, \"X\")[[1]][2]\n        \n        # This is faster and safer - just need to put the output back into\n        # raster format.\n        pr <- raster::as.matrix(pr_r[[.ind]])\n        tmn <- raster::as.matrix(tmin_r[[.ind]])\n        tmx <- raster::as.matrix(tmax_r[[.ind]])\n        print(paste0(\"x = \", x))\n        bc <- dismo::biovars(\n          prec = pr,\n          tmin = tmn,\n          tmax = tmx\n        )\n        print(\"setting values\")\n        bc <- raster::setValues(bc_temp, bc)\n        print(\"writing\")\n        filename <- paste0(\n          outpath, \"/bioclim_\", model, \"_\", scenario, \"_\", yr, \".nc\")\n        raster::writeRaster(bc, file = filename, format = \"CDF\", \n          overwrite = TRUE)\n        rm(bc)\n      })\n    print(\"stopping cluster\")\n    parallel::stopCluster(cl)\n    gc()\n  }\n\n  x <- lapply(1:length(pr_files), function(x){\n   t <- single_file(pr_files[x], tmin_files[x], tmax_files[x],\n      model, scenario, outpath)\n  })\n}\n\n#' make_baseline\n#' @name make_baseline\n#' @param model The name of the GCM model to use the model will be identified\n#' by searching for files in the file path, so files must be named in the right\n#' way. Can specify multiple models.\n#' @param start The starting year for the baseline\n#' @param end The ending year for the baseline\n#' @param future_scenario If the end date is after the extent of the historical\n#' files then we need to take from the future to make up the years - this is the\n#' rcp scenario to use for the future. rcp85 is recommended.\n#' @param file_path The file path to where the annual bioclims are. Defaults to\n#' NULL (i.e., run in the folder where the files are)\n#' @param outpath Where to save the baseline output to. Defaults to NULL.\n\nmake_baseline <- function(model, start = 1979, end = 2013, future_scenario, \n  file_path = NULL, outpath = NULL) {\n\n  # get the historical files\n  files <- list.files(file_path)\n  files <- files[grep(model, files)]\n  historical <- files[grep(\"historical\", files)]\n  years <- sapply(historical, function(x) {\n    a <- strsplit(x, \"_\")[[1]]\n    strsplit(a[4], \"\\\\.\")[[1]][1]\n  })\n  historical <- historical[as.numeric(years) >= start]\n\n  # now add extension, if needed.\n  if (end > max(as.numeric(years))) {\n    ext <- files[grep(future_scenario, files)]\n    years <- sapply(ext, function(x) {\n      a <- strsplit(x, \"_\")[[1]]\n      strsplit(a[4], \"\\\\.\")[[1]][1]\n    })\n    ext <- ext[as.numeric(years) <= end]\n    dat <- c(historical, ext)\n  } else {\n    dat <- historical\n  }\n\n  # now read these in and make a mean.\n  st <- lapply(dat, function(x) {\n    raster::stack(file.path(file_path, x))\n  })\n  stx <- Reduce(\"+\", st)\n  baseline <- stx / length(dat)\n  names(baseline) <- c(\"bio1\", \"bio2\", \"bio3\", \"bio4\", \"bio5\", \"bio6\", \"bio7\",\n    \"bio8\", \"bio9\", \"bio10\", \"bio11\", \"bio12\", \"bio13\", \"bio14\", \"bio15\", \n    \"bio16\", \"bio17\", \"bio18\", \"bio19\")\n\n  filename <- file.path(outpath, \n    paste0(model, \"_\", start, \"-\", end, \"_baseline.nc\")\n  )\n  raster::writeRaster(baseline, file = filename, format = \"CDF\",\n    overwrite = TRUE)\n}\n\n#' calculate_anomalies\n#' Calculates the anomalies between future climate scenarios and a baseline\n#' and saves the output to disk. The function calls cdo so all files need to be\n#' netCDF\n#' @param model The GCM to process data for\n#' @param scenario The scenario to process for (e.g. rcp26, rcp85)\n#' @param start The year to start at (needed because the baseline may use some\n#' years from the early part of the future simulations)\n#' @param baseline_path The file path where the baseline is saved\n#' @param future_path The file path where the futures are saved\n#' @param outpath Where to save the outputs to.\n\ncalculate_anomalies <- function(model, scenario, start, baseline_path, \n  future_path, outpath) {\n  # first load the baseline\n  base_files <- list.files(file.path(baseline_path))\n  base_file <- base_files[grep(model, base_files)]\n  # baseline <- raster::stack(\n  #   file.path(baseline_path, base_file)\n  # )\n\n  # now get the filenames for the model, scenario, years in the future\n  future_files <- list.files(file.path(future_path))\n  future_files <- future_files[grep(model, future_files)]\n  future_files <- future_files[grep(scenario, future_files)]\n\n  # now get the years.\n  years <- sapply(future_files, function(x) {\n    a <- strsplit(x, \"_\")[[1]]\n    strsplit(a[4], \"\\\\.\")[[1]][1]\n  })\n\n  future_files <- future_files[as.numeric(years) >= start]\n\n  # now calculate the anomalies.\n  cl <- parallel::makeForkCluster(10)\n    parallel::parLapply(cl, future_files, function(x) {\n      year <- strsplit(x, \"_\")[[1]]\n      year <- strsplit(year[4], \"\\\\.\")[[1]][1]\n      b_path <- file.path(baseline_path, base_file)\n      f_path <- file.path(future_path, x)\n      o_path <- file.path(outpath, \n        paste0(\n          paste(c(model, scenario, \"anomaly\", year), collapse = \"_\"), \".nc\")\n      )\n    system(paste(\"cdo sub\", f_path, b_path, o_path))\n    })\n  cl <- parallel::stopCluster(cl)\n}\n\ndownscale_bioclim <- function(reference, baseline, future) {\n  # calculate anomaly\n\n  # run single downscaling for that anomaly (seperate function?)\n\n  # save output\n\n}\n\ncrop_downscale <- function(anomaly, anomaly_path, current, extent, outpath) {\n  # anomaly is the file name anomaly stack.\n  # anomaly path is the path to the anomalies\n  # baseline path is the path to where the baselines are (to be matched with \n  # the anomaly name).\n  # extent is the extent of the european analysis.\n\n    x <- strsplit(anomaly, \"\\\\.\")\n    x <- strsplit(x[[1]][1], \"_\")[[1]]\n\n    filename <- paste0(x[1], \"_\", x[2], \"_\", x[4], \"_hires.grd\")\n    filename <- file.path(outpath, filename)\n\n  # load the anomaly\n  aa <- raster::stack(file.path(anomaly_path, anomaly))\n  \n  # crop the anomaly to the extent\n  aa <- raster::crop(aa, extent)\n\n  # load the current\n  cc <- raster::stack(current)\n  output_names <- c()\n  for (i in seq_along(names(aa))) {\n    an <- strsplit(anomaly, \"\\\\.\")[[1]][1]\n    tmp_file <- paste0(\".tmp_file_bio_\", \n      stringr::str_pad(i, 2, pad = \"0\"), \"_\", an, \".grd\")\n    output_names[i] <- tmp_file\n    a_h <- raster::resample(aa[[i]], cc[[i]], method = \"bilinear\")\n    a_h <- a_h + cc[[i]]\n    raster::writeRaster(a_h, file = tmp_file, format = \"raster\",\n      overwrite = TRUE)\n    rm(a_h)\n    gc()\n  }\n\n  # make a filename...\n  a_hires <- raster::stack(output_names)\n  raster::writeRaster(a_hires, file = filename, format = \"raster\")\n  # remove the temporary files.\n  # add .gri files to the vector.\n  output_names <- c(output_names,\n    paste0(unlist(strsplit(output_names, \".grd\")), \".gri\"))\n  file.remove(output_names)\n}\n\n# this function is going to average across each model in a year to make annual\n# averages, which will then be used to calculate decadal averages.\n\nhires_path <- \"./hires_bioclim_annual\"\nfiles <- list.files(hires_path)\nmodels <- unique(sapply(files, function(x) strsplit(x, \"_\")[[1]][1]))\nyears <- unique(sapply(files, function(x) strsplit(x, \"_\")[[1]][3]))\nrcps <- c(\"rcp26\", \"rcp60\", \"rcp85\")\nmode <- \"by_year\"\noutpath <- \"hires_annual_means\"\n\nannual_averages <- function(hires_path, models, years, rcps, mode = \"by_year\",\n  outpath) {\n  files <- list.files(hires_path)\n  dir.create(file.path(outpath), showWarnings = FALSE)\n  # identify all files of a particular year/model\n  if (mode == \"by_year\") {\n    all_denom <- years\n  } else if (mode == \"by_model\") {\n    all_denom <- models\n  }\n\n  # add RCPS\n  combos <- expand.grid(all_denom, c(\"rcp26\", \"rcp60\", \"rcp85\"))\n\n  # parallelise the work through these combos... keep an eye on RAM and disk\n  # space... \n\n  one_average <- function(files, denom, rcp) {\n    gp <- files[grep(denom, files)]\n    gp <- gp[grep(rcp, gp)]\n    gp <- gp[grep(\".grd$\", gp)]\n    x <- vector(mode = \"list\", length = length(gp))\n    for (i in seq_along(gp)) {\n      x[[i]] <- raster::brick(file.path(hires_path, gp[i]))\n    }\n    cl <- parallel::makeCluster(10)\n    mns <- parallel::parLapply\n\n\n    xm <- mean(x)\n    rm(x)\n    return(xm)\n  }\n\n  # parellisation check.\n\n\n\n\n  # write out.\n\n}\n\n\n# test something...\nx <- c(1:10)\nxx <- 0\nfor (i in seq_along(x)) {\n  xx <- xx + x[i]\n  print(xx / i)\n}\n\n\n\n# downscale_single <- function(current_path, future_anomaly) {\n#   # this is the basic line for the downscaling.\n#   # resample the anomalies to the same resolution as the hires\n#   hires <- resample(lowres_anomaly, hires_current, method=\"bilinear\")\n#   # then simply add...\n#   # NOTE there might need to be a recalculation here (i.e. convert to same \n#   # units.)\n#   # This is SUPER slow - I can use cdo again here, I think... test.\n#   hires_future <- hirescurrent + hires\n\n#   # time test the raster method.\n#   current_path <- \n\n#   future_anomaly <- \n\n# }\n\n# bioclim_averages <- function(models, window_size, scenario) {\n\n# }\n\n# start-to-finish wrapper function.\n\n# generate the bioclims across the range of models and scnearios.\nsetwd(\"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data\")\nmodels <- c(\"HadGEM2-ES\", \"IPSL-CM5A-LR\", \"MIROC5\", \"GFDL-ESM2M\")\nscenarios <- c(\"historical\", \"rcp26\", \"rcp60\", \"rcp85\")\ncombos <- expand.grid(models, scenarios)\n\n# use CDO to generate the means/sums and rescale the units.\nfiles <- c(\n  file.path(\"pr\", list.files(\"./pr\")),\n  file.path(\"tasmax\", list.files(\"./tasmax\")),\n  file.path(\"tasmin\", list.files(\"./tasmin\"))\n)\n\nkeeps <- c(\n  grep(models[1], files),\n  grep(models[2], files),\n  grep(models[3], files),\n  grep(models[4], files)\n)\nfiles <- files[keeps]\n\nprf <- files[grep(\"^pr\", files)]\ntminf <- files[grep(\"^tasmin\", files)]\ntmaxf <- files[grep(\"^tasmax\", files)]\ncdo_momeans(prf, outpath = \"./pr/pr_mosums\")\ncdo_momeans(tminf, outpath = \"./tasmin/tasmin_momeans\")\ncdo_momeans(tmaxf, outpath = \"./tasmax/tasmax_momeans\")\n\n# rescale the units and make monthly means (or, in the case of precip, sums).\n# list all the files - take the prefixes to make this somewhat easier...\n# should I use return files here?!\n\n# take the model and scenario and expand into grid to loop across - generate \n# annual bioclims per scenario, model, year combination.\n\n# generate annual bioclims\nfor (i in 1:nrow(combos)) {\n  make_bioclim(\n    model = as.character(combos$Var1[i]),\n    scenario = as.character(combos$Var2[i]),\n    pr_path = \"./pr/pr_mosums\",\n    tmin_path = \"./tasmin/tasmin_momeans\",\n    tmax_path = \"./tasmax/tasmax_momeans\",\n    outpath = \"lores_bioclim_annual\"\n  )\n}\n\n# make baselines\ncl <- parallel::makeForkCluster(4)\n  parallel::parLapply(cl, models, function(x) make_baseline(model = x, \n    start = 1979, end = 2013, \n    future_scenario = \"rcp85\",\n    file_path = \"lores_bioclim_annual\", outpath = \"baselines\"))\nparallel::stopCluster(cl)\n\n# calculate anomalies\nfutures <- c(\"rcp26\", \"rcp60\", \"rcp85\")\nfuture_combos <- expand.grid(models, futures)\nfor (i in 1:nrow(future_combos)) {\n  calculate_anomalies(\n    model = as.character(future_combos$Var1[i]),\n    scenario = as.character(future_combos$Var2[i]),\n    start = 2014,\n    baseline_path = \"baselines\",\n    future_path = \"lores_bioclim_annual\",\n    outpath = \"anomalies\"\n  )\n}\n\n# test a single instance of the resample to europe function\n# load extent\n# OK - this takes 10 hours, and requires 68.6*2 Gb of temp space MIN. That's\n# 137Gb - so I think make up to 150 just to make sure there's space for temp \n# files\n\nextent <- readRDS(\"../euro_extent.rds\")\nsystem.time(\ncrop_downscale(\n  anomaly = \"GFDL-ESM2M_rcp26_anomaly_2014.nc\",\n  anomaly_path = \"./anomalies\",\n  current = \"../chelsa_climatologies/chelsa_all_bioclim.grd\",\n  extent = extent,\n  outpath = \"hires_bioclim_annual\"\n  )\n)\n\n# Full global downscaling is going to a) take FOREVER and b) generate one \n# million gigabytes (approx.) of data - so for the time being I think it's best\n# to chop down to the european scale and downscale that for the sake of getting\n# the ADVENT work going sooner rather than later (i.e. get plugged into NEVO\n# with the pollinators).\n\n# the crop_downscale function will do this. It's still slow though - I need to\n# get this on the cluster for sure. It's using 10 cores at the moment - has been\n# going for over an hour - I am sure it's still working?\n\n# the first thing to do is to get the extent of the study area - this means\n# load in one of the examples from the advent project. It MIGHT be possible,\n# actually, to resample everything into the correct resolution for ADVENT as\n# well... This will, of course, replace the current bioclim data with the \n# CHELSA data - but that's fine... probably better in fact?\n\n# time the crop_downscale function and then compare that to the same operation\n# using cdos.\n\n# load in european extent from pollinators model.\neuro <- raster::stack(\n  \"/home/hfg/rds_mount/advent-rds/henry/advent/modeling/pollinators/jobs/bioclim_now_cropped.grd\"\n  )\neuro_w <- raster::projectRaster(euro, \n  crs = sp::CRS(sp::proj4string(raster::raster(\n    file.path(\"./anomalies\", anomalies[[1]])))))\n\n\n# then take just one of those layers... \ne_1 <- euro[[1]]\n# transform to match the other projections\ne_p <- raster::projectRaster(e_1, \n  crs = sp::CRS(sp::proj4string(raster::raster(anomalies[[1]]))))\n\n# then take the extent\neuro_e <- raster::extent(e_p)\n\n# save for the future...\nsaveRDS(euro, file = \"../../euro_extent.rds\")\nsaveRDS(e_1, file = \"../../euro_extent_map.rds\")\n\n# NOW - see if cropping to the new object will do both the rescale AND the \n# crop...\n\nanom <- raster::stack(\n  \"./anomalies/GFDL-ESM2M_rcp26_anomaly_2020.nc\"\n)\n\na_crop <- raster::crop(anom[[1]], euro)\nsystem.time({\n  a_crop <- raster::crop(anom, euro)\n  a1 <- raster::resample(a_crop, e_p, method = \"bilinear\")\n  x <- euro + a1\n  })\n\n# now we need the hi-res bioclim... unfortunately it's currently all seperate\n# layers - can we read it all in and make one object?!\n\nsetwd(\"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/chelsa_climatologies\")\nfiles <- list.files()\nfiles <- files[grep(\"CHELSA\", files)]\nxx <- raster::stack(files)\n\n# now read the anomaly\nanom <- raster::stack(\n  \"../isimip_data/anomalies/GFDL-ESM2M_rcp26_anomaly_2020.nc\"\n)\n\nsystem.time({\n  hires_anom <- raster::resample(anom, xx, method = \"bilinear\")\n})\n\n# How long does a single resample take? - answer! 8 minutes.\nsystem.time({\n  hires_anom <- raster::resample(anom, xx[[1]], method = \"bilinear\")\n  raster::writeRaster(hires_anom, file = \"test_hires.grd\", format = \"raster\")\n})\n\n# How long does it take to make anomalies for a full stack in parallel?\n# This is a NO - RAM caps out almost immediately. Perhaps take to the cluster?\n# I could do a seperate job (and thus ram) for each layer - the problem here\n# is that will be like... 99*19*4 jobs or something.\n\n\n# use gdalwarp to a) see what it does and b) see if it's faster.\n\n# if gdalwarp isn't any faster, or rather considerably faster, then make a\n# script for the cluster - it's going to be 1032 jobs to do each stack\n# altogether (8 hours ish per job) - that's 1 full queue and a tiny bit.\n\n# this seems slow, and I'm not even sure if it will work...\n\nchel <- \n\ngdalUtils::gdalwarp()\n\n# problem 1 - the layers/names are in the wrong order.\n# problem 2 - the names are different (probably fine?)\n# problem 3 - \n\n\n\n# FROM MYRIAD\n# Run is complete - check that it's worked and produced the right data...\n# I don't think it has thouygh - it's 3.6GB instead of the expected 68Gb...\n# I am not sure what's happened here? Got it! I did raster::raster not\n# raster::stack for the anomaly...\n\n#####\n#####\n\n# Take the \n",
+			"file": "cmip5downscaling.R",
+			"file_size": 22210,
+			"file_write_time": 132019762498145181,
+			"settings":
+			{
+				"buffer_size": 21044,
+				"line_ending": "Unix"
+			}
+		},
+		{
+			"file": "/home/hfg/pCloudDrive/hfg_todos/master.todo",
+			"settings":
+			{
+				"buffer_size": 7520,
+				"encoding": "UTF-8",
+				"line_ending": "Unix"
+			}
+		}
+	],
+	"build_system": "",
+	"build_system_choices":
+	[
+	],
+	"build_varint": "",
+	"command_palette":
+	{
+		"height": 357.0,
+		"last_filter": "",
+		"selected_items":
+		[
+			[
+				"note",
+				"Notes: Index"
+			],
+			[
+				"nn",
+				"Notes: New…"
+			],
+			[
+				"new",
+				"Notes: New…"
+			],
+			[
+				"not",
+				"Notes: New…"
+			],
+			[
+				"remove",
+				"Whitespace: Remove Trailing Whitespace"
+			],
+			[
+				"remove tr",
+				"Whitespace: Remove Trailing Whitespace"
+			],
+			[
+				"remo",
+				"Whitespace: Remove Trailing Whitespace"
+			],
+			[
+				"remove ",
+				"Whitespace: Remove Trailing Whitespace"
+			],
+			[
+				"install",
+				"Package Control: Install Package"
+			],
+			[
+				"LSP",
+				"LSP: Enable Language Server Globally"
+			],
+			[
+				"lsp",
+				"LSP: Enable Language Server Globally"
+			],
+			[
+				"ins",
+				"Package Control: Install Package"
+			],
+			[
+				"installp",
+				"Package Control: Install Package"
+			],
+			[
+				"install p",
+				"Package Control: Install Package"
+			],
+			[
+				"colo",
+				"Colorsublime: Install Theme"
+			],
+			[
+				"repl",
+				"SublimeREPL: R"
+			],
+			[
+				"new no",
+				"Notes: New…"
+			],
+			[
+				"NN",
+				"Notes: New…"
+			],
+			[
+				"nd",
+				"Notes: Delete"
+			],
+			[
+				"inbo",
+				"Notes: Inbox"
+			],
+			[
+				"n",
+				"Notes: Delete"
+			],
+			[
+				"remov",
+				"Package Control: Remove Package"
+			],
+			[
+				"no",
+				"Notes: New…"
+			],
+			[
+				"insta",
+				"Package Control: Install Package"
+			],
+			[
+				"termin",
+				"Terminal View: Open Bash Terminal"
+			],
+			[
+				"termina",
+				"Terminal View: Open Bash Terminal"
+			],
+			[
+				"term",
+				"Terminal: Open in project folder"
+			],
+			[
+				"format",
+				"R-Box: Format Selected Code"
+			],
+			[
+				"isntall",
+				"Package Control: Install Package"
+			],
+			[
+				"notes",
+				"Set Syntax: Notes"
+			],
+			[
+				"nid",
+				"Notes: Index"
+			]
+		],
+		"width": 551.0
+	},
+	"console":
+	{
+		"height": 79.0,
+		"history":
+		[
+			"import urllib.request,os,hashlib; h = '6f4c264a24d933ce70df5dedcf1dcaee' + 'ebe013ee18cced0ef93d5f746d80ef60'; pf = 'Package Control.sublime-package'; ipp = sublime.installed_packages_path(); urllib.request.install_opener( urllib.request.build_opener( urllib.request.ProxyHandler()) ); by = urllib.request.urlopen( 'http://packagecontrol.io/' + pf.replace(' ', '%20')).read(); dh = hashlib.sha256(by).hexdigest(); print('Error validating download (got %s instead of %s), please try manual install' % (dh, h)) if dh != h else open(os.path.join( ipp, pf), 'wb' ).write(by) "
+		]
+	},
+	"distraction_free":
+	{
+		"menu_visible": true,
+		"show_minimap": false,
+		"show_open_files": false,
+		"show_tabs": false,
+		"side_bar_visible": false,
+		"status_bar_visible": false
+	},
+	"expanded_folders":
+	[
+		"/home/hfg/Documents/hfg_soft/misc_work_scripts",
+		"/home/hfg/Documents/hfg_soft/packages"
+	],
+	"file_history":
+	[
+		"/home/hfg/Documents/todos/postdoc_todo.todo",
+		"/home/hfg/pCloudDrive/hfg_todos/postdoc_todo.todo",
+		"/home/hfg/Dropbox/Notes/reading_list.note",
+		"/home/hfg/Documents/ms/in_prep/uk_advent_shefs_paper/ms_dev.tex",
+		"/home/hfg/Documents/projects/misc/jon_birds/analyses/ancstates/alltips_stand_varrates_ancstates_job.sh",
+		"/home/hfg/Documents/projects/misc/jon_birds/analyses/ancstates/alltips_unstand_varrates_ancstates_job.sh",
+		"/home/hfg/Documents/projects/misc/jon_birds/analyses/ancstates/collapse_stand_varrates_ancstates_job.sh",
+		"/home/hfg/Documents/projects/misc/jon_birds/analyses/ancstates/collapse_unstand_varrates_ancstates_job.sh",
+		"/home/hfg/Documents/projects/misc/jon_birds/analyses/ancstates/moldat_stand_varrates_ancstates_job.sh",
+		"/home/hfg/Documents/projects/misc/jon_birds/analyses/ancstates/moldat_unstand_varrates_ancstates_job.sh",
+		"/home/hfg/Documents/projects/misc/jon_birds/analyses/ancstates/moldat_unstand_varrates_ancstates.in",
+		"/home/hfg/Documents/projects/misc/jon_birds/analyses/ancstates/collapse_unstand_varrates_ancstates.in",
+		"/home/hfg/Documents/projects/misc/jon_birds/analyses/ancstates/collapse_stand_varrates_ancstates.in",
+		"/home/hfg/Documents/projects/misc/jon_birds/analyses/ancstates/moldat_stand_varrates_ancstates.in",
+		"/home/hfg/Documents/projects/misc/jon_birds/analyses/ancstates/alltips_unstand_varrates_ancstates.in",
+		"/home/hfg/Documents/projects/misc/jon_birds/analyses/ancstates/alltips_stand_varrates_ancstates.in",
+		"/home/hfg/Documents/projects/misc/jon_birds/make_jobs.R",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/R/btSetupFuncs.R",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/marsupials_localrate.txt.Log.txt",
+		"/home/hfg/Documents/projects/misc/jon_birds/analyses/alltips_stand_varrates.in",
+		"/home/hfg/Documents/projects/misc/jon_birds/alltips_stand_varrates.txt.Log.txt",
+		"/home/hfg/Documents/projects/misc/jon_birds/alltips_stand_varrates.in",
+		"/home/hfg/Documents/projects/misc/jon_birds/alltips_unstand_varrates.txt.Output.trees",
+		"/home/hfg/Documents/projects/misc/jon_birds/collapse_unstand_varrates.txt.Output.trees",
+		"/home/hfg/Documents/projects/misc/jon_birds/moldat_stand_varrates.txt.Output.trees",
+		"/home/hfg/Documents/projects/misc/jon_birds/collapse_stand_varrates.txt.Output.trees",
+		"/home/hfg/Documents/projects/misc/jon_birds/moldat_unstand_varrates.txt.Output.trees",
+		"/home/hfg/Documents/projects/misc/jon_birds/alltips_stand_varrates.txt.Output.trees",
+		"/home/hfg/Documents/projects/misc/jon_birds/alltips_stand_bm.trees",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/testdata_setup.R",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/marsupial_localrate_tag.txt",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/jo_new_feature/feature_request.txt",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/marsupials_localrate.in",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/MarsupialsLTCom.txt",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/marsupials_localrate.txt",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/jo_new_feature/test.txt.Log.txt",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/R/miscFunctions.R",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/Artiodactyl2.txt",
+		"/home/hfg/Documents/projects/misc/jon_birds/analyses/stand_moltree_bm.txt",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/MammalModelB.txt",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/BirdHetCom.txt",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/BirdTerritory.txt",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/NortheastBantu.txt",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/MammalBrainBodyNoTapir.txt",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/MammalBrainBodySampleData.txt",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/MammalBrainBody.txt",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/Artiodactyl.txt",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/marsupials_variabledelta.in",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/R/getAncStates.R",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/jo_new_feature/test.txt.VarRates.txt",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/R/plotShifts.R",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/R/BTprocessR_S3.R",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/DESCRIPTION",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/marsupials_ancrec.in",
+		"/home/hfg/Documents/hfg_soft/packages/hfgr/R/invisibleApply.R",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/testdata/marsupials_vrates.in",
+		"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data/myriad_jobs/GFDL-ESM2M_rcp26_anomaly_2014_job.sh",
+		"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data/myriad_jobs/crop_downscale.R",
+		"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data/make_crop_downscale_jobs.R",
+		"/home/hfg/Documents/hfg_soft/packages/bayestraitr/R/plotShifts.R",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/R/rjpp.R",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/NAMESPACE",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/controllist_example.R",
+		"/home/hfg/Documents/hfg_soft/packages/BTprocessR/controllist_example.txt",
+		"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data/myriad_jobs/GFDL-ESM2M_rcp26_anomaly_2024_downscale.R",
+		"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/make_jobscript.R",
+		"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data/myriad_jobs/MIROC5_rcp85_anomaly_2099_job.sh",
+		"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data/myriad_jobs/MIROC5_rcp85_anomaly_2099_downscale_test.R",
+		"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data/myriad_test/scp_test.R",
+		"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data/myriad_test/scp_test_makejobs.R",
+		"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data/myriad_jobs/GFDL-ESM2M_rcp26_anomaly_2016_job.sh",
+		"/run/user/1001/gvfs/smb-share:server=live.rd.ucl.ac.uk,share=ritd-ag-project-rd00nc-hferg62/henry/advent/climate_data/isimip_data/make_crop_downscale_jobs.R",
+		"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data/myriad_jobs/GFDL-ESM2M_rcp26_anomaly_2017_job.sh",
+		"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data/myriad_jobs/test_scp.R",
+		"/home/hfg/rds_mount/advent-rds/henry/advent/modeling/pollinators/jobs/anasimyia_contracta_job.sh",
+		"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data/myriad_jobs/GFDL-ESM2M_rcp26_anomaly_2018_downscale_test.R",
+		"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data/myriad_jobs/GFDL-ESM2M_rcp26_anomaly_2018_downscale.R",
+		"/home/hfg/Documents/hfg_soft/packages/sdmpl/R/combineParameters.R",
+		"/home/hfg/Documents/hfg_soft/packages/sdmpl/R/convertToExeter.R",
+		"/home/hfg/Documents/hfg_soft/packages/sdmpl/R/rarefyPoints.R",
+		"/home/hfg/Documents/projects/misc/bterrestris_invasions/prep.R",
+		"/home/hfg/Documents/projects/advent/hierachical_sdm_sims/sdm_hierachy_sims.R",
+		"/run/user/1001/gvfs/smb-share:server=live.rd.ucl.ac.uk,share=ritd-ag-project-rd00nc-hferg62/henry/advent/modeling/pollinators/dataPrepFuncs.R",
+		"/home/hfg/Documents/hfg_soft/packages/sdmpl/R/paRaster.R",
+		"/home/hfg/Documents/hfg_soft/projects/wpa/spdist_sim.R",
+		"/home/hfg/Documents/hfg_soft/projects/wpa/three_step_pa.R",
+		"/run/user/1001/gvfs/smb-share:server=live.rd.ucl.ac.uk,share=ritd-ag-project-rd00nc-hferg62/henry/advent/climate_data/isimip_data/par_resampe.out",
+		"/home/hfg/Documents/projects/advent/short_grant_comments/auc_figure.R",
+		"/home/hfg/Dropbox/Notes/CBER server du.note",
+		"/home/hfg/Documents/projects/shefs/helping/fran/model_all_cereals_200319.R",
+		"/home/hfg/Documents/hfg_soft/misc/misc_projects/advent_of_code/day_02.R",
+		"/home/hfg/Documents/hfg_soft/misc_work_scripts/hortModel_parallel.R",
+		"/home/hfg/Documents/hfg_soft/misc/misc_projects/hydrationcalc/hydrationCalculator.R",
+		"/run/user/1001/gvfs/smb-share:server=live.rd.ucl.ac.uk,share=ritd-ag-project-rd00nc-hferg62/henry/advent/climate_data/isimip_data/anomalies/MIROC5_rcp85_anomaly_2098_downscale.R",
+		"/home/hfg/rds_mount/shefs-rds/Vivienne/CMIP5/CMIP5_Rscripts/CMIP5_tas_downscaling.R",
+		"/home/hfg/rds_mount/advent-rds/henry/advent/climate_data/isimip_data/parallel_output.out",
+		"/home/hfg/pCloudDrive/hfg_projects/name_helper/namePlot.R",
+		"/home/hfg/pCloudDrive/hfg_projects/name_helper/app.R",
+		"/run/user/1001/gvfs/smb-share:server=live.rd.ucl.ac.uk,share=ritd-ag-project-rd00nd-hferg62/henry/cmip5_downscaling/CMIP5_tas_downscaling.R",
+		"/home/hfg/Documents/hfg_soft/misc/misc_projects/hydrationCalculator.R",
+		"/home/hfg/Documents/projects/advent/modeling/pollinators/clusterCombine.R",
+		"/home/hfg/Documents/projects/advent/modeling/pollinators/dataPrepFuncs.R",
+		"/home/hfg/Documents/projects/advent/modeling/pollinators/pollinatorsPrep.R",
+		"/home/hfg/Documents/hfg_soft/packages/sdmpl/R/combineOutputs.R",
+		"/home/hfg/pCloudDrive/hfg_todos/reading_list.todo",
+		"/home/hfg/Documents/projects/advent/modeling/pollinators/pollinatorsPrep_hort_lords.R",
+		"/home/hfg/Documents/hfg_soft/packages/sdmpl/R/newLanduse.R",
+		"/home/hfg/Documents/projects/shefs/analysis/uk/eat_well_scenario/loop_version.R",
+		"/home/hfg/Documents/projects/advent/modeling/pollinators/clusterCombineFunctions.R",
+		"/home/hfg/Documents/projects/advent/modeling/pollinators/jobs_horti/clusterTar.sh",
+		"/home/hfg/Documents/projects/shefs/analysis/uk/eat_well_scenario/proof_of_concept_crop_first.R",
+		"/home/hfg/Documents/hfg_soft/packages/sdmpl/testing.R",
+		"/home/hfg/Documents/projects/advent/modeling/pollinators/jobs/colletes_halophilus_job.sh",
+		"/home/hfg/Documents/hfg_soft/packages/sdmpl/R/fullModel.R",
+		"/home/hfg/Documents/projects/advent/modeling/pollinators/jobs/anasimyia_lineata_analysis.R",
+		"/home/hfg/Documents/hfg_soft/packages/sdmpl/pipeline_v4.R",
+		"/home/hfg/Documents/projects/advent/meeting/advent_meeting_4thdec2018/presentationFigures.R",
+		"/home/hfg/Documents/projects/advent/modeling/pollinators/jobs/anasimyia_contracta_job.sh",
+		"/home/hfg/Documents/projects/advent/modeling/pollinators/jobs/anasimyia_contracta_analysis.R",
+		"/home/hfg/Documents/projects/advent/modeling/pollinators/jobs/anasimyia_interpuncta_analysis.R",
+		"/home/hfg/Documents/projects/advent/modeling/pollinators/jobs/colletes_halophilus_analysis.R",
+		"/home/hfg/Documents/projects/advent/modeling/pollinators/jobs/pipiza_austriaca_job.sh",
+		"/home/hfg/Documents/projects/advent/modeling/pollinators/clusterTar.sh",
+		"/home/hfg/Documents/projects/advent/modeling/pollinators/jobs/pipeline_v4.R",
+		"/home/hfg/Documents/hfg_soft/misc/misc_projects/reddit/get_pms.py",
+		"/home/hfg/Documents/hfg_soft/misc/misc_projects/reddit/analysis.R",
+		"/home/hfg/Documents/hfg_soft/misc/misc_projects/advent_of_code/day_1.R",
+		"/home/hfg/Documents/projects/advent/modeling/bees/proof_of_concept/Bombus_bohemicus_analysis.R"
+	],
+	"find":
+	{
+		"height": 26.0
+	},
+	"find_in_files":
+	{
+		"height": 158.0,
+		"where_history":
+		[
+		]
+	},
+	"find_state":
+	{
+		"case_sensitive": false,
+		"find_history":
+		[
+		],
+		"highlight": true,
+		"in_selection": false,
+		"preserve_case": false,
+		"regex": false,
+		"replace_history":
+		[
+		],
+		"reverse": false,
+		"show_context": true,
+		"use_buffer2": true,
+		"whole_word": true,
+		"wrap": true
+	},
+	"groups":
+	[
+		{
+			"selected": 0,
+			"sheets":
+			[
+				{
+					"buffer": 0,
+					"file": "cmip5downscaling.R",
+					"semi_transient": false,
+					"settings":
+					{
+						"buffer_size": 21044,
+						"regions":
+						{
+						},
+						"selection":
+						[
+							[
+								13562,
+								13562
+							]
+						],
+						"settings":
+						{
+							"bracket_highlighter.busy": false,
+							"bracket_highlighter.clone": -1,
+							"bracket_highlighter.clone_locations":
+							{
+								"close":
+								{
+								},
+								"icon":
+								{
+								},
+								"open":
+								{
+								},
+								"unmatched":
+								{
+								}
+							},
+							"bracket_highlighter.clone_regions":
+							[
+								"bh_double_quote",
+								"bh_double_quote_center",
+								"bh_double_quote_open",
+								"bh_double_quote_close",
+								"bh_double_quote_content",
+								"bh_square",
+								"bh_square_center",
+								"bh_square_open",
+								"bh_square_close",
+								"bh_square_content",
+								"bh_default",
+								"bh_default_center",
+								"bh_default_open",
+								"bh_default_close",
+								"bh_default_content",
+								"bh_curly",
+								"bh_curly_center",
+								"bh_curly_open",
+								"bh_curly_close",
+								"bh_curly_content",
+								"bh_c_define",
+								"bh_c_define_center",
+								"bh_c_define_open",
+								"bh_c_define_close",
+								"bh_c_define_content",
+								"bh_angle",
+								"bh_angle_center",
+								"bh_angle_open",
+								"bh_angle_close",
+								"bh_angle_content",
+								"bh_tag",
+								"bh_tag_center",
+								"bh_tag_open",
+								"bh_tag_close",
+								"bh_tag_content",
+								"bh_unmatched",
+								"bh_unmatched_center",
+								"bh_unmatched_open",
+								"bh_unmatched_close",
+								"bh_unmatched_content",
+								"bh_round",
+								"bh_round_center",
+								"bh_round_open",
+								"bh_round_close",
+								"bh_round_content",
+								"bh_regex",
+								"bh_regex_center",
+								"bh_regex_open",
+								"bh_regex_close",
+								"bh_regex_content",
+								"bh_single_quote",
+								"bh_single_quote_center",
+								"bh_single_quote_open",
+								"bh_single_quote_close",
+								"bh_single_quote_content"
+							],
+							"bracket_highlighter.locations":
+							{
+								"close":
+								{
+									"1":
+									[
+										13610,
+										13611
+									]
+								},
+								"icon":
+								{
+									"1":
+									[
+										"Packages/BracketHighlighter/icons/curly_bracket.png",
+										"region.purplish"
+									]
+								},
+								"open":
+								{
+									"1":
+									[
+										13249,
+										13250
+									]
+								},
+								"unmatched":
+								{
+								}
+							},
+							"bracket_highlighter.regions":
+							[
+								"bh_double_quote",
+								"bh_double_quote_center",
+								"bh_double_quote_open",
+								"bh_double_quote_close",
+								"bh_double_quote_content",
+								"bh_square",
+								"bh_square_center",
+								"bh_square_open",
+								"bh_square_close",
+								"bh_square_content",
+								"bh_default",
+								"bh_default_center",
+								"bh_default_open",
+								"bh_default_close",
+								"bh_default_content",
+								"bh_curly",
+								"bh_curly_center",
+								"bh_curly_open",
+								"bh_curly_close",
+								"bh_curly_content",
+								"bh_c_define",
+								"bh_c_define_center",
+								"bh_c_define_open",
+								"bh_c_define_close",
+								"bh_c_define_content",
+								"bh_angle",
+								"bh_angle_center",
+								"bh_angle_open",
+								"bh_angle_close",
+								"bh_angle_content",
+								"bh_tag",
+								"bh_tag_center",
+								"bh_tag_open",
+								"bh_tag_close",
+								"bh_tag_content",
+								"bh_unmatched",
+								"bh_unmatched_center",
+								"bh_unmatched_open",
+								"bh_unmatched_close",
+								"bh_unmatched_content",
+								"bh_round",
+								"bh_round_center",
+								"bh_round_open",
+								"bh_round_close",
+								"bh_round_content",
+								"bh_regex",
+								"bh_regex_center",
+								"bh_regex_open",
+								"bh_regex_close",
+								"bh_regex_content",
+								"bh_single_quote",
+								"bh_single_quote_center",
+								"bh_single_quote_open",
+								"bh_single_quote_close",
+								"bh_single_quote_content"
+							],
+							"lsp_language":
+							{
+								"rlang": "r"
+							},
+							"show_definitions": false,
+							"syntax": "Packages/R/R.sublime-syntax",
+							"tab_size": 2,
+							"translate_tabs_to_spaces": true
+						},
+						"translation.x": 0.0,
+						"translation.y": 5355.0,
+						"zoom_level": 1.0
+					},
+					"stack_index": 0,
+					"type": "text"
+				}
+			]
+		},
+		{
+			"selected": 0,
+			"sheets":
+			[
+				{
+					"buffer": 1,
+					"file": "/home/hfg/pCloudDrive/hfg_todos/master.todo",
+					"semi_transient": false,
+					"settings":
+					{
+						"buffer_size": 7520,
+						"regions":
+						{
+						},
+						"selection":
+						[
+							[
+								0,
+								0
+							]
+						],
+						"settings":
+						{
+							"bracket_highlighter.busy": false,
+							"bracket_highlighter.clone": -1,
+							"bracket_highlighter.clone_locations":
+							{
+								"close":
+								{
+								},
+								"icon":
+								{
+								},
+								"open":
+								{
+								},
+								"unmatched":
+								{
+								}
+							},
+							"bracket_highlighter.clone_regions":
+							[
+								"bh_double_quote",
+								"bh_double_quote_center",
+								"bh_double_quote_open",
+								"bh_double_quote_close",
+								"bh_double_quote_content",
+								"bh_square",
+								"bh_square_center",
+								"bh_square_open",
+								"bh_square_close",
+								"bh_square_content",
+								"bh_default",
+								"bh_default_center",
+								"bh_default_open",
+								"bh_default_close",
+								"bh_default_content",
+								"bh_curly",
+								"bh_curly_center",
+								"bh_curly_open",
+								"bh_curly_close",
+								"bh_curly_content",
+								"bh_c_define",
+								"bh_c_define_center",
+								"bh_c_define_open",
+								"bh_c_define_close",
+								"bh_c_define_content",
+								"bh_angle",
+								"bh_angle_center",
+								"bh_angle_open",
+								"bh_angle_close",
+								"bh_angle_content",
+								"bh_tag",
+								"bh_tag_center",
+								"bh_tag_open",
+								"bh_tag_close",
+								"bh_tag_content",
+								"bh_unmatched",
+								"bh_unmatched_center",
+								"bh_unmatched_open",
+								"bh_unmatched_close",
+								"bh_unmatched_content",
+								"bh_round",
+								"bh_round_center",
+								"bh_round_open",
+								"bh_round_close",
+								"bh_round_content",
+								"bh_regex",
+								"bh_regex_center",
+								"bh_regex_open",
+								"bh_regex_close",
+								"bh_regex_content",
+								"bh_single_quote",
+								"bh_single_quote_center",
+								"bh_single_quote_open",
+								"bh_single_quote_close",
+								"bh_single_quote_content"
+							],
+							"bracket_highlighter.locations":
+							{
+								"close":
+								{
+								},
+								"icon":
+								{
+								},
+								"open":
+								{
+								},
+								"unmatched":
+								{
+								}
+							},
+							"bracket_highlighter.regions":
+							[
+								"bh_double_quote",
+								"bh_double_quote_center",
+								"bh_double_quote_open",
+								"bh_double_quote_close",
+								"bh_double_quote_content",
+								"bh_square",
+								"bh_square_center",
+								"bh_square_open",
+								"bh_square_close",
+								"bh_square_content",
+								"bh_default",
+								"bh_default_center",
+								"bh_default_open",
+								"bh_default_close",
+								"bh_default_content",
+								"bh_curly",
+								"bh_curly_center",
+								"bh_curly_open",
+								"bh_curly_close",
+								"bh_curly_content",
+								"bh_c_define",
+								"bh_c_define_center",
+								"bh_c_define_open",
+								"bh_c_define_close",
+								"bh_c_define_content",
+								"bh_angle",
+								"bh_angle_center",
+								"bh_angle_open",
+								"bh_angle_close",
+								"bh_angle_content",
+								"bh_tag",
+								"bh_tag_center",
+								"bh_tag_open",
+								"bh_tag_close",
+								"bh_tag_content",
+								"bh_unmatched",
+								"bh_unmatched_center",
+								"bh_unmatched_open",
+								"bh_unmatched_close",
+								"bh_unmatched_content",
+								"bh_round",
+								"bh_round_center",
+								"bh_round_open",
+								"bh_round_close",
+								"bh_round_content",
+								"bh_regex",
+								"bh_regex_center",
+								"bh_regex_open",
+								"bh_regex_close",
+								"bh_regex_content",
+								"bh_single_quote",
+								"bh_single_quote_center",
+								"bh_single_quote_open",
+								"bh_single_quote_close",
+								"bh_single_quote_content"
+							],
+							"plain_tasks_remain_time_phantoms":
+							[
+							],
+							"syntax": "Packages/PlainTasks/PlainTasks.sublime-syntax",
+							"tab_size": 2,
+							"translate_tabs_to_spaces": true
+						},
+						"translation.x": 0.0,
+						"translation.y": 0.0,
+						"zoom_level": 1.0
+					},
+					"stack_index": 1,
+					"type": "text"
+				}
+			]
+		}
+	],
+	"incremental_find":
+	{
+		"height": 26.0
+	},
+	"input":
+	{
+		"height": 64.0
+	},
+	"layout":
+	{
+		"cells":
+		[
+			[
+				0,
+				0,
+				1,
+				1
+			],
+			[
+				1,
+				0,
+				2,
+				1
+			]
+		],
+		"cols":
+		[
+			0.0,
+			0.5,
+			1.0
+		],
+		"rows":
+		[
+			0.0,
+			1.0
+		]
+	},
+	"menu_visible": true,
+	"output.find_results":
+	{
+		"height": 0.0
+	},
+	"pinned_build_system": "",
+	"project": "cmip5downscaling.sublime-project",
+	"replace":
+	{
+		"height": 48.0
+	},
+	"save_all_on_build": true,
+	"select_file":
+	{
+		"height": 0.0,
+		"last_filter": "",
+		"selected_items":
+		[
+		],
+		"width": 0.0
+	},
+	"select_project":
+	{
+		"height": 500.0,
+		"last_filter": "",
+		"selected_items":
+		[
+		],
+		"width": 380.0
+	},
+	"select_symbol":
+	{
+		"height": 0.0,
+		"last_filter": "",
+		"selected_items":
+		[
+		],
+		"width": 0.0
+	},
+	"selected_group": 0,
+	"settings":
+	{
+	},
+	"show_minimap": true,
+	"show_open_files": false,
+	"show_tabs": true,
+	"side_bar_visible": true,
+	"side_bar_width": 208.0,
+	"status_bar_visible": true,
+	"template_settings":
+	{
+	}
+}
